@@ -1,5 +1,6 @@
 // Exported functions from assembly
 extern unsigned char CheckPC();
+extern unsigned char Detect8088();
 extern unsigned char TapeMotorOn();
 extern void TapeMotorOff();
 extern unsigned char ReadTape(unsigned char* pBuffer, unsigned int nBytesToRead, unsigned int* pBytesRead);
@@ -10,7 +11,7 @@ extern void DumpMemory(const void* pOffset, unsigned int nLength);
 FILE* pFile = NULL;
 
 unsigned char* pTapeBuffer = NULL;
-unsigned int nMaximumDataSize = 0xFFFF;
+unsigned int nMaximumDataSize = 0xcccc;
 
 const char* pFileName = NULL;
 unsigned int nWaitForPressPlay = 0;
@@ -106,12 +107,18 @@ void PrintMaximumSizeLimit()
   printf("\nMaximum data size (available memory in current code segment): %u bytes\n", nMaximumDataSize);
 }
 
-// Will fail to run on a non IBM-5150 or PCjr
+// Will fail to run on a non IBM-5150 or PCjr, or without a proper 4.77MHz 8088
 void CheckCurrentSetup()
 {
   if (!CheckPC())
   {
     printf("\nAn original IBM 5150 or PCjr is required to run this application.\n");
+    Quit(EXIT_FAILURE);
+  }
+  
+  if (!Detect8088())
+  {
+    printf("\nA genuine Intel 8088 CPU is required to run this application.\n");
     Quit(EXIT_FAILURE);
   }
 }
@@ -121,7 +128,7 @@ void PrintUsage()
 {
   printf("\nUsage:\n"
          "5150CAXX [/A] /R filename [bytes]\n"
-	 "         [/A] /W filename [bytes]\n"
+	 "         [/A] /W filename\n"
 	 "         [/A] /D [bytes]\n"
 	 "         [/A] /X [bytes]\n\n"
 	 "where:\n"
@@ -161,18 +168,18 @@ void ParseCommandLine(int argc, char* argv[])
     }
     else if ( (indexArgs == argc-1) && (nArgument > 0) )
     {
-      // SIze to read or write manually specified on commandline. Check if it is 0 < arg < 64K
+      // Size to read or write manually specified on commandline. Check if it is 0 < arg < 64K
       for (indexSec = 0; indexSec < strlen(pArgument); indexSec++)
       {
-	if (isdigit(pArgument[indexSec]) == 0)
-	{
-	  // Contains letters, ignore it
-	  nArgument = 0;
-	  break;
-	}
+        if (isdigit(pArgument[indexSec]) == 0)
+        {
+          // Contains letters, ignore it
+          nArgument = 0;
+          break;
+        }
       }
       
-      if (nArgument <= 0xffff)
+      if (nArgument <= nMaximumDataSize)
       {
         nSpecifiedBytes = (unsigned int)nArgument;
       }      
@@ -320,6 +327,13 @@ void DoOperation()
     break;
   case 'X':
     printf(", and execute them as code in the current CS.\n\n");
+  }
+  
+  // Warn about possible extra dummy data at the end of the file
+  if ((cOperation != 'W') && (nSpecifiedBytes == nMaximumDataSize))
+  {
+    printf("Warning: no data length specified. Will read until end-of-tape or data error.\n"
+           "As soon as this occurs, the file might be zero padded after the end.\n\n");
   }
   
   // Read file and write to tape  

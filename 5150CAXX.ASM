@@ -3,6 +3,7 @@
 .code
 
 public _CheckPC                     ; List of exported functions
+public _Detect8088
 public _TapeMotorOn
 public _TapeMotorOff
 public _ReadTape
@@ -30,6 +31,25 @@ ibmPcJr:
   mov ax,1                          ; Found, return 1
   ret
 _CheckPC endp
+
+_Detect8088 proc                    ; Must be an Intel 8088
+  push sp                           ; 8088 pushes the decremented value of SP on stack
+  pop ax
+  cmp ax,sp                         ; All the others push the original value of SP
+  jnz is8088                        ; before the actual push
+  xor ax,ax
+  ret                               ; Fail
+is8088:                             ; NEC (Vxx) test
+  mov ax,0100h
+  aad 2                             ; AX shall be 2, NECs return AX=0ah (ignore the immediate)
+  cmp ax,2
+  je isIntel
+  xor ax,ax                         ; Fail
+  ret
+isIntel:
+  mov ax,1                          ; Success, continue with execution
+  ret
+_Detect8088 endp
 
 _TapeMotorOn proc                   ; Turn tape drive on
   xor ax,ax
@@ -95,8 +115,10 @@ _WriteTape endp
 _CallMemory proc                   ; NEAR call to the buffer we allocated for ourselves
   push bp
   mov bp,sp
-  push offset return               ; Stack contains IP of ... us at "return" label, CS stays the same
-  push word ptr [bp+04]            ; pOffset
+  mov ax,offset return
+  push ax                          ; Stack contains IP of ... us at "return" label, CS stays the same
+  mov ax,word ptr [bp+04]              
+  push ax                          ; pOffset
   ret                              ; Actually does "call pOffset" (pops offset from stack)
   
 return:                            ; We get here if the code we got from the tape calls RET (and didn't screw up the stack)
