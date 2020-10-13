@@ -182,7 +182,12 @@ void ParseCommandLine(int argc, char* argv[])
       if (nArgument <= nMaximumDataSize)
       {
         nSpecifiedBytes = (unsigned int)nArgument;
-      }      
+      }
+      else
+      {
+        printf("\nSpecified data size %lu exceeds memory segment boundary\n", nArgument);
+        Quit(EXIT_FAILURE);
+      }
     }
     else if ( (argc > indexArgs+1) && (stricmp(pArgument, "/R") == 0) )
     {
@@ -209,12 +214,6 @@ void ParseCommandLine(int argc, char* argv[])
   {
     PrintUsage();
     Quit(EXIT_SUCCESS);
-  }
-
-  if (nSpecifiedBytes > nMaximumDataSize)
-  {
-    printf("\nSpecified data size %u exceeds memory segment boundary\n", nSpecifiedBytes);
-    Quit(EXIT_FAILURE);
   }
 }
 
