@@ -76,8 +76,10 @@ _ReadTape proc                     ; Read tape - NEAR call: we have IP on stack 
   mov bp,sp                        ; Now the 1st argument (buffer pointer), size == 16 bits, appears at stack+0Ch
   mov ax,0200h                     ; INT 15h: Read tape
   mov bx,word ptr [bp+0Ch]         ; ES:BX: pBuffer (same segment)
-  mov cx,word ptr [bp+0Eh]         ; nBytesToRead 
+  mov cx,word ptr [bp+0Eh]         ; nBytesToRead
+  cli                              ; Disable hardware interrupt ISRs while reading
   int 15h
+  sti                              ; Enable interrupts
   mov al,ah                        ; Pass return code from AH to AL
   xor ah,ah
   mov di,word ptr [bp+10h]         ; pBytesRead
@@ -99,7 +101,9 @@ _WriteTape proc                    ; Write tape - NEAR call, so IP on stack (1st
   mov ax,0300h                     ; INT 15h: Write tape
   mov bx,word ptr [bp+0Ah]         ; pBuffer
   mov cx,word ptr [bp+0Ch]         ; nBytesToWrite
+  cli                              ; Disable hardware interrupt ISRs while writing
   int 15h
+  sti                              ; Enable interrupts
   mov al,ah                        ; Return unsigned char in AL
   xor ah,ah
   sub bx,word ptr [bp+0Ah]         ; Subtract the auto-incremented buffer pointer minus the beginning offset
