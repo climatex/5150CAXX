@@ -3,8 +3,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
+#include <mem.h>
+#include <dos.h>
 
 #include "5150caxx.h"
 

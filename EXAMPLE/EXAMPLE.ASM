@@ -13,7 +13,7 @@ jmp start       ; Skip "execution" of the string
 db 'Hello world!',13,10,'$'
 
 start:
-add di,3        ;skip "pop di" (2 bytes) and "jmp start" (1 byte), so that it points to the string
+add di,3        ;skip "pop di" (1 byte) and "jmp short start" (2 bytes), so that it points to the string
 xor ax,ax       ;Set 40x25
 int 10h
 mov ah,9        ;Print the string
@@ -23,4 +23,4 @@ xor ax,ax       ;Wait for a keypress
 int 16h
 mov ax,0003     ;Set 80x25 again
 int 10h
-ret             ;NEAR return to parent that called it (5150CAXX in this case)
+retf            ;FAR return to parent that called it (5150CAXX in this case)
