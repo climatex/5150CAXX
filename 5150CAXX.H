@@ -193,7 +193,10 @@ void WaitForKeypress()
     printf("Press %sPLAY on tape and then press a key to continue...",
            (cOperation == 'W') ? "RECORD+" : "");
   
-    (void)getchar();
+    _asm {
+      xor ax,ax
+      int 16h
+    }
   }
 }
 
