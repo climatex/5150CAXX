@@ -1,7 +1,6 @@
 @echo off
 
 REM *** Assumes DOS Turbo C compiler in C:\TC ***
-REM *** Place Turbo Assembler (TASM) into %TC%\BIN if it's not there ***
 
 set TC=C:\TC
 
