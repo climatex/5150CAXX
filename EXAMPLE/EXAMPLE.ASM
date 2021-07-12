@@ -2,22 +2,17 @@
 ; Assemble with FASM or similar
 
 use16           ; 16-bit binary
-org 0           ; We don't know where we will be loaded, so offset nothing
+org 0           ; 5150CAXX.EXE allocates a new 64K segment with data starting at offset 0
 
-call get_ip     ; Get instruction pointer by doing a NEAR call
-get_ip:         ; IP of this address pushed on stack
-pop di          ; Get it to DI
+jmp start
 
-jmp start       ; Skip "execution" of the string
-
-db 'Hello world!',13,10,'$'
+message db 'Hello world!',13,10,'$'
 
 start:
-add di,3        ;skip "pop di" (1 byte) and "jmp short start" (2 bytes), so that it points to the string
 xor ax,ax       ;Set 40x25
 int 10h
 mov ah,9        ;Print the string
-mov dx,di       ;offset in DI
+lea dx,[message]
 int 21h
 xor ax,ax       ;Wait for a keypress
 int 16h
