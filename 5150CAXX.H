@@ -7,6 +7,7 @@ const char* pFileName = NULL;
 unsigned int nWaitForPressPlay = 0;
 unsigned char cOperation = 0;
 unsigned int nSpecifiedBytes = 0;
+unsigned char nTargetIsMemorySegment = 0;
 
 // Relay goes click...
 unsigned char TapeMotorOn()
@@ -164,13 +165,14 @@ void Quit(int nStatus)
     }
   }
   
-  // Deallocate memory and make sure the tape motor is off
-  if (nBufferSegment)
+  // Deallocate memory used with disk I/O
+  if (!nTargetIsMemorySegment && nBufferSegment)
   {
     freemem(nBufferSegment);
-    TapeMotorOff();
   }
   
+  // Make sure the tape motor is off before passing control
+  TapeMotorOff();
   exit(nStatus);
 }
 
@@ -242,13 +244,15 @@ void PrintMaximumSizeLimit()
   printf("\nMaximum data size: ");
   if (nMaximumDataSize == 0xffff)
   {
-    printf("64K\n");
+    printf("64K");
   }
   
   else
   {
-    printf("%u bytes\n", nMaximumDataSize);
+    printf("%u bytes", nMaximumDataSize);
   }
+  
+  printf(" for file I/O, 64K for a memory segment\n");
 }
 
 // Will fail to run on a non IBM-5150 or PCjr, or without a proper 4.77MHz 8088
@@ -295,27 +299,27 @@ void CheckCurrentSetup()
 void PrintUsage()
 {
   printf("\nUsage:\n"
-         "5150CAXX [/A] /R filename [bytes]\n"
-	     "         [/A] /W filename\n"
+         "5150CAXX [/A] /R target [bytes]\n"
+	     "         [/A] /W source [bytes]\n"
 	     "         [/A] /D [bytes]\n"
 	     "         [/A] /X [bytes]\n\n"
 	     "where:\n"
-	     " /R - reads number of [bytes] from tape and saves them to file on disk,\n"
-	     " /W - reads file from disk and records it to tape,\n"
+	     " /R - reads number of [bytes] from tape and saves them to target,\n"
+	     " /W - reads source up to [bytes] length, and records it to tape,\n"
 	     " /D - reads number of [bytes] from tape and dumps them to screen as raw ASCII,\n"
-	     " /X - reads number of [bytes] from tape and executes them as machine code,\n"
+	     " /X - reads number of [bytes] from tape and executes them as code at org 0,\n"
 	     " /A - (optional) asks to press play on tape before the selected operation.\n\n"
-	     "Connect your tape recorder to the DIN5 socket next to the keyboard connector.\n"
+	     "The source and target can be a filename or a hex memory segment (e.g. 0x0050).\n"
 	     "Seek your tape to the desired point from which to begin the operation, first.\n"
-	     "The file cannot be bigger than the maximum size in bytes written on-screen.\n"
-	     "/X will crash the system if illegal instructions are read from the tape.\n\n"
-	     "If no [bytes] are given, the program will read the maximum data size from tape.\n");
+	     "A file operation cannot take more than the maximum size written on-screen.\n"
+	     "/X will crash the system if illegal instructions are read from the tape.\n");
 }
 
 void ParseCommandLine(int argc, char* argv[])
 {
   int indexArgs = 0;
   int indexSec = 0;
+  long nWantedBytes = 0;
   
   // Display usage information  
   if ( (argc < 2) || (argc > 5) )
@@ -327,33 +331,21 @@ void ParseCommandLine(int argc, char* argv[])
   for (indexArgs = 1; indexArgs < argc; indexArgs++)
   {
     char* pArgument = argv[indexArgs];
-    long nArgument = atol(pArgument);
+    nWantedBytes = atol(pArgument);
     
     if (stricmp(pArgument, "/A") == 0)
     {
       nWaitForPressPlay = 1;  
     }
-    else if ( (indexArgs == argc-1) && (nArgument > 0) )
+    else if ( (indexArgs == argc-1) && (nWantedBytes > 0) )
     {
-      // Size to read or write manually specified on commandline. Check if it is 0 < arg < 64K
       for (indexSec = 0; indexSec < strlen(pArgument); indexSec++)
       {
         if (isdigit(pArgument[indexSec]) == 0)
         {
-          // Contains letters, ignore it
-          nArgument = 0;
+          nWantedBytes = 0;
           break;
         }
-      }
-      
-      if (nArgument <= nMaximumDataSize)
-      {
-        nSpecifiedBytes = (unsigned int)nArgument;
-      }
-      else
-      {
-        printf("\nSpecified data size of %lu bytes exceeds free memory\n", nArgument);
-        Quit(EXIT_FAILURE);
       }
     }
     else if ( (argc > indexArgs+1) && (stricmp(pArgument, "/R") == 0) )
@@ -374,6 +366,39 @@ void ParseCommandLine(int argc, char* argv[])
     {
       cOperation = 'X';
     }
+  }
+  
+  // Is the target not a filename, but a memory segment?
+  nTargetIsMemorySegment = pFileName && (strnicmp(pFileName, "0x", 2) == 0) && (strlen(pFileName) == 6);
+  if (nTargetIsMemorySegment)
+  {
+    // Deallocate memory reserved file usage
+    freemem(nBufferSegment);
+    
+    // Set the int 15h buffer segment manually    
+    nBufferSegment = (unsigned int)strtoul(pFileName, NULL, 16);
+    nMaximumDataSize = 0xffff; //full realmode segments are 64K max.
+    
+    // Sanity check
+    if ((nBufferSegment == 0) && (stricmp(pFileName, "0x0000") != 0))
+    {
+      printf("\nInvalid memory segment specified\n");
+      Quit(EXIT_FAILURE);
+    }
+  }
+  
+  // Size to read or write manually specified on commandline. Check if it is 0 < arg < 64K
+  if (nWantedBytes > 0)
+  {
+    if (nWantedBytes <= nMaximumDataSize)
+    {
+      nSpecifiedBytes = (unsigned int)nWantedBytes;
+    }
+    else
+    {
+      printf("\nSpecified data size of %lu bytes exceeds free memory in segment\n", nWantedBytes);
+      Quit(EXIT_FAILURE);
+    } 
   }
   
   // Still unknown operation
@@ -431,22 +456,18 @@ void CheckForErrors(unsigned char nResult, const int nRecording)
 void DoOperation()
 {
   unsigned int nSuccessfulBytes = 0;
-  unsigned char nMainOperationResult = 0;
+  unsigned char nMainOperationResult = 0;                                              
   long nFileSize = 0;
-  
+    
   // Will be reading or writing a file ? Open it in the correct mode
-  switch(cOperation)
+  if (!nTargetIsMemorySegment && ((cOperation == 'R') || (cOperation == 'W')))
   {
-  case 'R':
-  case 'W':
     pFile = fopen(pFileName, (cOperation == 'R') ? "wb" : "rb");
     if (!pFile)
     {
-      printf("\nCannot open %s for %s\n", pFileName, (cOperation == 'R') ? "writing" : "reading");
+      printf("\nCannot open file \"%s\" for %s\n", pFileName, (cOperation == 'R') ? "writing" : "reading");
       Quit(EXIT_FAILURE);
     }
-  default:
-    break;
   }
   
   // No manually specified number of bytes to read/write (or invalid)  
@@ -456,7 +477,7 @@ void DoOperation()
   }
   
   // If we're going to write to the tape, inform about the boundary  
-  if (cOperation == 'W')
+  if (pFile && (cOperation == 'W'))
   {
     fseek(pFile, 0, SEEK_END);
     nFileSize = ftell(pFile);
@@ -480,10 +501,10 @@ void DoOperation()
   switch(cOperation)
   {
   case 'R':
-    printf(" to file %s.\n\n", pFileName);
+    printf(" to %s %s.\n\n", !nTargetIsMemorySegment ? "file" : "memory segment", pFileName);
     break;
   case 'W':
-    printf(" from file %s.\n\n", pFileName);
+    printf(" from %s %s.\n\n", !nTargetIsMemorySegment ? "file" : "memory segment", pFileName);
     break;
   case 'D':
     printf(", and display them as ASCII.\n\n");
@@ -496,20 +517,26 @@ void DoOperation()
   if ((cOperation != 'W') && (nSpecifiedBytes == nMaximumDataSize))
   {
     printf("Warning: no data length specified. Will read until end-of-tape or data error.\n"
-           "The file might have some extra data padded at the end.\n\n");
+           "There might be some extra data padded at the end of the buffer.\n\n");
   }
   
-  // Read file and write to tape  
+  // Read file/memory segment and write to tape  
   if (cOperation == 'W')
   {
     unsigned int nOffset = 0;
+    
+    if (nTargetIsMemorySegment)
+    {
+      _asm jmp _skipread
+    }
+    
     printf("Reading file...");
 
-    // In 4K increments (no far fread)
+    // In 1K increments (no far fread)
     while (nOffset != nSpecifiedBytes)
     {
-      unsigned char cBuffer[4096] = {0};
-      const int nSize = ((nSpecifiedBytes-nOffset) < 4096) ? nSpecifiedBytes-nOffset : 4096;
+      unsigned char cBuffer[1024] = {0};
+      const int nSize = ((nSpecifiedBytes-nOffset) < 1024) ? nSpecifiedBytes-nOffset : 1024;
       size_t nResult = fread(cBuffer, sizeof(unsigned char), nSize, pFile);
       
       if (nResult < nSize)
@@ -524,6 +551,7 @@ void DoOperation()
     }
     
     DelLine();
+_skipread:
     WaitForKeypress();
     DelLine();
     
@@ -543,7 +571,7 @@ void DoOperation()
     Quit(EXIT_SUCCESS);
   }
   
-  // Read from tape and write to file/do an ASCII dump/whatever else is handled here  
+  // Read from tape and write to file/memory segment/do an ASCII dump/whatever else is handled here  
   WaitForKeypress();
   DelLine();
   
@@ -558,9 +586,17 @@ void DoOperation()
   
   printf("\n%u out of %u bytes read successfully.\n", nSuccessfulBytes, nSpecifiedBytes);
   
+  // Quit with an error
   if (nSuccessfulBytes == 0)
   {
     Quit(EXIT_FAILURE);
+  }
+  
+  // Do nothing more if the target is a custom memory segment
+  if (nTargetIsMemorySegment)
+  {
+    printf("\nTape buffer stored at address 0x%04X:0.\n", nBufferSegment);
+    Quit(EXIT_SUCCESS);
   }
   
   // Now decide what to do with the buffer
@@ -572,11 +608,11 @@ void DoOperation()
     unsigned int nOffset = 0;
     printf("\nWriting file...");
     
-    // in 4K increments from the far memory (no far fwrite)
+    // in 1K increments from the far memory (no far fwrite)
     while (nOffset != nSuccessfulBytes)
     {
-      unsigned char cBuffer[4096] = {0};
-      const int nSize = ((nSuccessfulBytes-nOffset) < 4096) ? nSuccessfulBytes-nOffset : 4096;
+      unsigned char cBuffer[1024] = {0};
+      const int nSize = ((nSuccessfulBytes-nOffset) < 1024) ? nSuccessfulBytes-nOffset : 1024;
       
       _fmemcpy(cBuffer, MK_FP(nBufferSegment, nOffset), nSize);
       
