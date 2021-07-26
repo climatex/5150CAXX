@@ -1,11 +1,13 @@
 FILE* pFile = NULL;
 
+unsigned char* pHeapBuffer = NULL;
 unsigned int nBufferSegment = 0;
 unsigned int nMaximumDataSize = 0xffff;
 
 const char* pFileName = NULL;
 unsigned int nWaitForPressPlay = 0;
 unsigned char cOperation = 0;
+unsigned long nWantedBytes = 0;
 unsigned int nSpecifiedBytes = 0;
 unsigned char nTargetIsMemorySegment = 0;
 
@@ -164,9 +166,15 @@ void Quit(int nStatus)
       remove(pFileName);
     }
   }
+
+  // Deallocate memory used with disk I/O: was it on heap?
+  if (pHeapBuffer)
+  {
+    free(pHeapBuffer);
+  }
   
-  // Deallocate memory used with disk I/O
-  if (!nTargetIsMemorySegment && nBufferSegment)
+  // No, it was a DOS memory block (default)
+  else if (!nTargetIsMemorySegment && nBufferSegment)
   {
     freemem(nBufferSegment);
   }
@@ -215,7 +223,7 @@ void DelLine()
   printf("\r");
 }
 
-// Determine maximum free memory in our code segment
+// Determine maximum free memory
 void PrintMaximumSizeLimit()
 { 
   // Allocate 64K max (4096 16-byte paragraphs) and return segment:offset always 0
@@ -231,11 +239,50 @@ void PrintMaximumSizeLimit()
       allocmem(nStatus, &nBufferSegment);
     }
     
-    // Zero paragraphs available
+    // Zero paragraphs available. Try malloc on heap...
     else
     {
-      printf("\nNot enough memory to run the application.\n");
-      Quit(EXIT_FAILURE);
+      // Reserve some 3K on heap for the standard library (fopen etc)
+      const unsigned int nReserve = 3*1024;
+      
+      unsigned long nAddress;
+      unsigned int nAllocSize = coreleft();
+      
+      // Check how many bytes left on heap and if within reserve
+      if (nAllocSize < nReserve)
+      {
+        asm jmp _nomem;
+      }
+      
+      nAllocSize -= nReserve;
+      pHeapBuffer = malloc(nAllocSize);
+      if (!pHeapBuffer)
+      {
+_nomem:
+        printf("\nNot enough memory to run the application.\n");
+        Quit(EXIT_FAILURE);
+      }
+      
+      // Determine address of heap buffer in memory
+      nAddress = (_DS * (unsigned long)0x10) + (unsigned int)(pHeapBuffer);
+      
+      // Not aligned to offset 0? (most of the time)
+      if (nAddress % 0x10)
+      {
+        // Align to 0 and subtract the offset difference from the maximum available size
+        unsigned long nAlignedAddress;
+        nBufferSegment = (unsigned int)((nAddress / 0x10) + 1);
+        nAlignedAddress = nBufferSegment * (unsigned long)0x10;
+        
+        nMaximumDataSize = nAllocSize - labs(nAlignedAddress - nAddress);
+      }
+           
+      // Aligned perfectly, use as is
+      else
+      {
+        nBufferSegment = (unsigned int)(nAddress / 0x10); //set segment
+        nMaximumDataSize = nAllocSize;
+      }
     }
   }
   
@@ -244,15 +291,13 @@ void PrintMaximumSizeLimit()
   printf("\nMaximum data size: ");
   if (nMaximumDataSize == 0xffff)
   {
-    printf("64K");
+    printf("64K\n");
   }
   
   else
   {
-    printf("%u bytes", nMaximumDataSize);
+    printf("%u bytes (64K, if given existing RAM segment)\n", nMaximumDataSize);
   }
-  
-  printf(" for file I/O, 64K for a memory segment\n");
 }
 
 // Will fail to run on a non IBM-5150 or PCjr, or without a proper 4.77MHz 8088
@@ -309,17 +354,18 @@ void PrintUsage()
 	     " /D - reads number of [bytes] from tape and dumps them to screen as raw ASCII,\n"
 	     " /X - reads number of [bytes] from tape and executes them as code at org 0,\n"
 	     " /A - (optional) asks to press play on tape before the selected operation.\n\n"
-	     "The source and target can be a filename or a hex memory segment (e.g. 0x0050).\n"
 	     "Seek your tape to the desired point from which to begin the operation, first.\n"
-	     "A file operation cannot take more than the maximum size written on-screen.\n"
-	     "/X will crash the system if illegal instructions are read from the tape.\n");
+         "The source and target can be a file name or a hex memory segment (eg. 0xF600).\n"	     
+	     "Using segments instead of file names (/R and /W only) might cause a crash\n"
+         "if writing into nonexistent (unallocated) or already occupied locations.\n"
+	     "/X will crash the system if illegal instructions are read from the tape.\n"
+         "Using [bytes] is optional. In any case, the max size above cannot be exceeded.\n");
 }
 
 void ParseCommandLine(int argc, char* argv[])
 {
   int indexArgs = 0;
   int indexSec = 0;
-  long nWantedBytes = 0;
   
   // Display usage information  
   if ( (argc < 2) || (argc > 5) )
@@ -331,7 +377,7 @@ void ParseCommandLine(int argc, char* argv[])
   for (indexArgs = 1; indexArgs < argc; indexArgs++)
   {
     char* pArgument = argv[indexArgs];
-    nWantedBytes = atol(pArgument);
+    nWantedBytes = strtoul(pArgument, NULL, 10);
     
     if (stricmp(pArgument, "/A") == 0)
     {
@@ -369,21 +415,33 @@ void ParseCommandLine(int argc, char* argv[])
   }
   
   // Is the target not a filename, but a memory segment?
-  nTargetIsMemorySegment = pFileName && (strnicmp(pFileName, "0x", 2) == 0) && (strlen(pFileName) == 6);
+  nTargetIsMemorySegment = pFileName && (strnicmp(pFileName, "0x", 2) == 0);
   if (nTargetIsMemorySegment)
   {
+    unsigned long nCmdLine = strtoul(pFileName, NULL, 16);
+    
+    // Sanity check
+    if ((nCmdLine > 0xffff) || ((nCmdLine == 0) && 
+                                (strcmp(pFileName, "0") != 0) &&
+                                (strcmp(pFileName, "0x0000") != 0)))
+    {
+      printf("\nInvalid memory segment specified\n");
+      Quit(EXIT_FAILURE);
+    }
+
     // Deallocate memory reserved file usage
     freemem(nBufferSegment);
     
     // Set the int 15h buffer segment manually    
-    nBufferSegment = (unsigned int)strtoul(pFileName, NULL, 16);
-    nMaximumDataSize = 0xffff; //full realmode segments are 64K max.
+    nBufferSegment = (unsigned int)nCmdLine;
+    nMaximumDataSize = 0xffff; //full segments are 64K max.
     
-    // Sanity check
-    if ((nBufferSegment == 0) && (stricmp(pFileName, "0x0000") != 0))
+    // Correct maximum data size if going past the 1MB boundary
+    nCmdLine *= 0x10;
+    if (nCmdLine+nMaximumDataSize > 0xfffff)
     {
-      printf("\nInvalid memory segment specified\n");
-      Quit(EXIT_FAILURE);
+      nMaximumDataSize = (unsigned int)(0x100000 - nCmdLine);
+      printf("Reducing this to %u bytes, for segment not to overlap the 1MB boundary.\n", nMaximumDataSize);
     }
   }
   
@@ -396,7 +454,7 @@ void ParseCommandLine(int argc, char* argv[])
     }
     else
     {
-      printf("\nSpecified data size of %lu bytes exceeds free memory in segment\n", nWantedBytes);
+      printf("\nSpecified data size of %lu bytes exceeds memory/segment limit\n", nWantedBytes);
       Quit(EXIT_FAILURE);
     } 
   }
@@ -501,10 +559,24 @@ void DoOperation()
   switch(cOperation)
   {
   case 'R':
-    printf(" to %s %s.\n\n", !nTargetIsMemorySegment ? "file" : "memory segment", pFileName);
+    if (!nTargetIsMemorySegment)
+    {
+      printf(" to file %s.\n\n", pFileName);
+    }
+    else
+    {
+      printf(" to memory segment 0x%04X.\n\n", nBufferSegment);
+    }
     break;
   case 'W':
-    printf(" from %s %s.\n\n", !nTargetIsMemorySegment ? "file" : "memory segment", pFileName);
+    if (!nTargetIsMemorySegment)
+    {
+      printf(" from file %s.\n\n", pFileName);
+    }
+    else
+    {
+      printf(" from memory segment 0x%04X.\n\n", nBufferSegment);  
+    }
     break;
   case 'D':
     printf(", and display them as ASCII.\n\n");
@@ -514,7 +586,7 @@ void DoOperation()
   }
   
   // Warn about possible extra dummy data at the end of the file
-  if ((cOperation != 'W') && (nSpecifiedBytes == nMaximumDataSize))
+  if ((cOperation != 'W') && (nWantedBytes == 0))
   {
     printf("Warning: no data length specified. Will read until end-of-tape or data error.\n"
            "There might be some extra data padded at the end of the buffer.\n\n");
@@ -565,7 +637,7 @@ _skipread:
     CheckForErrors(nMainOperationResult, 1);
     
     printf("\n%u out of %u bytes recorded successfully.\n"
-           "Be sure you note this value, and also your current tape position.\n",
+           "Be sure you note down this value, and also your current tape position.\n",
 	       nSuccessfulBytes, nSpecifiedBytes);
     
     Quit(EXIT_SUCCESS);
