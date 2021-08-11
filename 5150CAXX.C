@@ -1,5 +1,5 @@
-// 5150CAXX (c) J. Bogin
-// Compile using BUILD.BAT
+/* 5150CAXX (c) J. Bogin
+   Compile using BUILD.BAT */
 
 #include <stdio.h>
 #include <stdlib.h>

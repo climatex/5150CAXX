@@ -1,6 +1,6 @@
 @echo off
 
-REM *** Assumes DOS Turbo C compiler in C:\TC ***
+REM *** Assumes DOS Turbo C v3 in C:\TC ***
 
 set TC=C:\TC
 
