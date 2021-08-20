@@ -1,15 +1,47 @@
 FILE* pFile = NULL;
 
-unsigned char* pHeapBuffer = NULL;
+unsigned char* pNearBuffer = NULL;
+unsigned char far* pFarBuffer = NULL;
 unsigned int nBufferSegment = 0;
 unsigned int nMaximumDataSize = 0xffff;
 
 const char* pFileName = NULL;
-unsigned int nWaitForPressPlay = 0;
+unsigned char cFileNameOnly[9] = {0};
+unsigned char cFileExtOnly[5] = {0};
+
+unsigned char nWaitForPressPlay = 0;
 unsigned char cOperation = 0;
+unsigned char nCreateBASICRecord = 0;
 unsigned long nWantedBytes = 0;
 unsigned int nSpecifiedBytes = 0;
 unsigned char nTargetIsMemorySegment = 0;
+
+/* 244-byte BASIC stub */
+unsigned char sBASICStub[244] =
+{
+	0xF5, 0x0C, 0x01, 0x00, 0x92, 0x2C, 0x1C, 0x00, 0x20, 0x3A, 0x20, 0x97,
+	0x20, 0x53, 0x45, 0x47, 0xE7, 0x0C, 0xAD, 0xDE, 0x3A, 0x20, 0x82, 0x20,
+	0x49, 0xE7, 0x11, 0x20, 0xCC, 0x20, 0x0F, 0x1F, 0x3A, 0x20, 0x87, 0x20,
+	0x4A, 0x3A, 0x20, 0x98, 0x20, 0x49, 0x2C, 0x4A, 0x3A, 0x20, 0x83, 0x20,
+	0x49, 0x3A, 0x20, 0x49, 0xE7, 0x11, 0x3A, 0x20, 0xB3, 0x20, 0x49, 0x00,
+	0x32, 0x0D, 0x02, 0x00, 0x84, 0x20, 0x26, 0x48, 0x42, 0x39, 0x2C, 0x26,
+	0x48, 0x44, 0x45, 0x2C, 0x26, 0x48, 0x41, 0x44, 0x2C, 0x26, 0x48, 0x42,
+	0x38, 0x2C, 0x26, 0x48, 0x44, 0x45, 0x2C, 0x26, 0x48, 0x41, 0x44, 0x2C,
+	0x26, 0x48, 0x42, 0x42, 0x2C, 0x26, 0x48, 0x44, 0x45, 0x2C, 0x26, 0x48,
+	0x41, 0x44, 0x2C, 0x26, 0x48, 0x38, 0x45, 0x2C, 0x26, 0x48, 0x44, 0x38,
+	0x00, 0x74, 0x0D, 0x03, 0x00, 0x84, 0x20, 0x26, 0x48, 0x38, 0x45, 0x2C,
+	0x26, 0x48, 0x43, 0x30, 0x2C, 0x26, 0x48, 0x38, 0x39, 0x2C, 0x26, 0x48,
+	0x43, 0x32, 0x2C, 0x26, 0x48, 0x38, 0x33, 0x2C, 0x26, 0x48, 0x45, 0x41,
+	0x2C, 0x26, 0x48, 0x33, 0x30, 0x2C, 0x26, 0x48, 0x38, 0x45, 0x2C, 0x26,
+	0x48, 0x44, 0x32, 0x2C, 0x26, 0x48, 0x42, 0x43, 0x2C, 0x26, 0x48, 0x30,
+	0x30, 0x2C, 0x26, 0x48, 0x30, 0x32, 0x00, 0xA7, 0x0D, 0x04, 0x00, 0x84,
+	0x20, 0x26, 0x48, 0x35, 0x30, 0x2C, 0x26, 0x48, 0x35, 0x33, 0x2C, 0x26,
+	0x48, 0x42, 0x34, 0x2C, 0x26, 0x48, 0x30, 0x32, 0x2C, 0x26, 0x48, 0x46,
+	0x41, 0x2C, 0x26, 0x48, 0x43, 0x44, 0x2C, 0x26, 0x48, 0x31, 0x35, 0x2C,
+	0x26, 0x48, 0x46, 0x42, 0x2C, 0x26, 0x48, 0x43, 0x42, 0x00, 0xAD, 0x0D,
+	0x05, 0x00, 0x81, 0x00
+};
+
 
 /* Relay goes click... */
 unsigned char TapeMotorOn()
@@ -71,6 +103,71 @@ unsigned char WriteTape(unsigned int nBytesToWrite, unsigned int* nBytesWritten)
   *nBytesWritten = regs.x.bx;
   
   return regs.h.ah;
+}
+
+/* Write from memory to tape and include a ROM-BASIC loader stub */
+unsigned char WriteTapeWithBasicStub(unsigned int nBytesToWrite, unsigned int* nBytesWritten,
+                                     unsigned int nSegment, unsigned int nOffset)
+{
+  union REGS regs;
+  struct SREGS sregs;
+  unsigned char cBuf[17] = {0};
+    
+  /* Prepare the BASIC header */
+  cBuf[0] = 0xA5;
+  memset(&cBuf[1], 0x20, 8); /* name padded with spaces */
+  memcpy(&cBuf[1], cFileNameOnly, strlen(cFileNameOnly));  
+  cBuf[9] = 0x80; /* tokenized BASIC */
+  cBuf[0xA] = sizeof(sBASICStub); /* 244 */
+  cBuf[0xC] = 0x60; /* BASIC loader will be at 0060:081E, same as IBM Advanced Diagnostics */
+  cBuf[0xE] = 0x1E;
+  cBuf[0xF] = 0x08;
+  
+  /* Write the BASIC header */
+  regs.x.ax = 0x300;
+  regs.x.cx = sizeof(cBuf);
+  sregs.es = FP_SEG(cBuf);
+  regs.x.bx = FP_OFF(cBuf);
+  asm cli  
+  int86x(0x15, &regs, &regs, &sregs);
+  asm sti
+  
+  /* Prepare the BASIC loader */
+  memset(cBuf, 0, 16);
+  
+  /* Binary loading location: nSegment:nOffset. nOffset equals 0x100 if .COM extension, otherwise 0. */
+  /* 2 bytes: set DEF SEG for a machine code stub loader, to load the rest of the tape, at nSegment-0x10 */
+  /* Stack segment is set inside to nSegment-0x30:0x200, i.e. right below said stub. */
+  {
+    unsigned int* setDefSeg = (unsigned int*)&(sBASICStub[0x12]);
+    *setDefSeg = nSegment - 0x10;
+  }
+  
+  /* Ugly tokenized BASIC PEEK-POKE machine code follows. First, DATA &H(low byte), then &H(high byte) */  
+  sprintf(cBuf, "&H%02X", (unsigned char)nBytesToWrite);          /* MOV CX,nBytesToWrite. (CX for INT15h, AH=02) */
+  memcpy(&(sBASICStub[0x47]), cBuf, 4);
+  sprintf(cBuf, "&H%02X", (unsigned char)(nBytesToWrite >> 8));
+  memcpy(&(sBASICStub[0x4C]), cBuf, 4);
+  sprintf(cBuf, "&H%02X", (unsigned char)nSegment);               /* MOV AX,nSegment. (Binary loading segment.) */
+  memcpy(&(sBASICStub[0x56]), cBuf, 4);
+  sprintf(cBuf, "&H%02X", (unsigned char)(nSegment >> 8));
+  memcpy(&(sBASICStub[0x5B]), cBuf, 4);
+  sprintf(cBuf, "&H%02X", (unsigned char)nOffset);                /* MOV BX,nOffset. (Binary loading offset.) */
+  memcpy(&(sBASICStub[0x65]), cBuf, 4);
+  sprintf(cBuf, "&H%02X", (unsigned char)(nOffset >> 8));
+  memcpy(&(sBASICStub[0x6A]), cBuf, 4);
+                   
+  /* Write the BASIC stub */
+  regs.x.ax = 0x300;
+  regs.x.cx = sizeof(sBASICStub);
+  sregs.es = FP_SEG(sBASICStub);
+  regs.x.bx = FP_OFF(sBASICStub);
+  asm cli  
+  int86x(0x15, &regs, &regs, &sregs);
+  asm sti
+    
+  /* And finally write the program binary */  
+  return WriteTape(nBytesToWrite, nBytesWritten);  
 }
 
 /* Dump tape buffer to screen */
@@ -167,18 +264,16 @@ void Quit(int nStatus)
     }
   }
 
-  /* Deallocate memory used with disk I/O: was it on heap? */
-  if (pHeapBuffer)
+  /* Deallocate memory used with disk I/O */
+  if (pNearBuffer)
   {
-    free(pHeapBuffer);
+    free(pNearBuffer);
   }
-  
-  /* No, it was a DOS memory block (default) */
-  else if (!nTargetIsMemorySegment && nBufferSegment)
+  else if (pFarBuffer)
   {
-    freemem(nBufferSegment);
+    farfree(pFarBuffer);
   }
-  
+    
   /* Make sure the tape motor is off before passing control */
   TapeMotorOff();
   exit(nStatus);
@@ -221,67 +316,99 @@ void DelLine()
 
 /* Determine maximum free memory */
 void PrintMaximumSizeLimit()
-{ 
-  /* Allocate 64K max (4096 16-byte paragraphs) and return segment:offset always 0 */
-  int nStatus = allocmem(4096, &nBufferSegment);
+{  
+  unsigned char nAllocateNearBuffer = 0;
+  unsigned long nAddress = 0;
+   
+  /* Allocate 64K RAM (+ some reserve for the zero offset alignment)... */
+  unsigned long nAllocSize = (unsigned long)nMaximumDataSize + 16;
+  pFarBuffer = farmalloc(nAllocSize);
   
   /* Not enough memory? */
-  if (nStatus != -1)
+  if (!pFarBuffer)
   {
-    /* Allocate the maximum paragraph count (times 16) */
-    if (nStatus > 0)
-    {
-      nMaximumDataSize = nStatus * 16;
-      allocmem(nStatus, &nBufferSegment);
-    }
+    /* Get free memory (minus some reserve for the standard library) for both heaps */
+    const unsigned int nNearFree = coreleft();
+    const unsigned long nFarFree = farcoreleft();
+    unsigned long nFree = 0;
+    const unsigned int nReserve = 3*1024;
     
-    /* Zero paragraphs available. Try malloc on heap... */
+    /* Which one is greater? */       
+    if ((unsigned long)nNearFree < nFarFree)
+    {
+      nFree = nFarFree;
+    }
     else
     {
-      /* Reserve some 3K on heap for the standard library (fopen etc) */
-      const unsigned int nReserve = 3*1024;
-      
-      unsigned long nAddress;
-      unsigned int nAllocSize = coreleft();
-      
-      /* Check how many bytes left on heap and if within reserve */
-      if (nAllocSize < nReserve)
-      {
-        asm jmp _nomem;
-      }
-      
-      nAllocSize -= nReserve;
-      pHeapBuffer = malloc(nAllocSize);
-      if (!pHeapBuffer)
-      {
-_nomem:
-        printf("\nNot enough memory to run the application.\n");
-        Quit(EXIT_FAILURE);
-      }
-      
-      /* Determine address of heap buffer in memory */
-      nAddress = (_DS * (unsigned long)0x10) + (unsigned int)(pHeapBuffer);
-      
-      /* Not aligned to offset 0? (most of the time) */
-      if (nAddress % 0x10)
-      {
-        /* Align to 0 and subtract the offset difference from the maximum available size */
-        unsigned long nAlignedAddress;
-        nBufferSegment = (unsigned int)((nAddress / 0x10) + 1);
-        nAlignedAddress = nBufferSegment * (unsigned long)0x10;
-        
-        nMaximumDataSize = nAllocSize - labs(nAlignedAddress - nAddress);
-      }
-           
-      /* Aligned perfectly, use as is */
-      else
-      {
-        nBufferSegment = (unsigned int)(nAddress / 0x10); /* set segment */
-        nMaximumDataSize = nAllocSize;
-      }
+      nFree = nNearFree;
+      nAllocateNearBuffer = 1;
     }
+    
+    /* Subtract the reserve */
+    if (nFree <= nReserve)
+    {
+_nomem:
+      printf("\nNot enough memory to run the application.\n");
+      Quit(EXIT_FAILURE);
+    }
+    
+    /* Try again, with reduced maximum size */
+    nAllocSize = nFree - nReserve;
+    
+    /* near or far... */    
+    if (!nAllocateNearBuffer)
+    {
+      pFarBuffer = farmalloc(nAllocSize);
+      if (!pFarBuffer)
+      {
+        asm jmp _nomem
+      }  
+    }
+    else
+    {
+      pNearBuffer = malloc((unsigned int)nAllocSize);
+      if (!pNearBuffer)
+      {
+        asm jmp _nomem
+      }
+    }    
+  }
+    
+  /* Success. Determine address of heap buffer in memory */
+  if (!nAllocateNearBuffer)
+  {
+    nAddress = (FP_SEG(pFarBuffer) * (unsigned long)0x10) + FP_OFF(pFarBuffer);    
+  }
+  else
+  {
+    nAddress = (_DS * (unsigned long)0x10) + (unsigned int)(pNearBuffer);    
+  }  
+  
+  /* Not aligned to offset 0? (most of the time) */
+  if (nAddress % 0x10)
+  {
+    /* Align to 0 and subtract the offset difference from the maximum available size */
+    unsigned long nAlignedAddress;
+    nBufferSegment = (unsigned int)((nAddress / 0x10) + 1);
+    nAlignedAddress = nBufferSegment * (unsigned long)0x10;
+    
+    nAllocSize -= labs(nAlignedAddress - nAddress);
+  }
+       
+  /* Aligned perfectly, use as is */
+  else
+  {
+    nBufferSegment = (unsigned int)(nAddress / 0x10); /* set segment */
   }
   
+  /* Round to 64K and set maximum data size */
+  if (nAllocSize > 0xffff)
+  {
+    nAllocSize = 0xffff;
+  }
+  nMaximumDataSize = (unsigned int)nAllocSize;
+  
+  /* Clear the buffer */
   _fmemset(MK_FP(nBufferSegment, 0), 0, nMaximumDataSize);
   
   printf("\nMaximum data size: ");
@@ -339,22 +466,24 @@ void CheckCurrentSetup()
 /* Printed on incorrect or no command line arguments */
 void PrintUsage()
 {
-  printf("\nUsage:\n"
-         "5150CAXX [/A] /R target [bytes]\n"
-	     "         [/A] /W source [bytes]\n"
-	     "         [/A] /D [bytes]\n"
-	     "         [/A] /X [bytes]\n\n"
-	     "where:\n"
-	     " /R - reads number of [bytes] from tape and saves them to target,\n"
-	     " /W - reads source up to [bytes] length, and records it to tape,\n"
-	     " /D - reads number of [bytes] from tape and dumps them to screen as raw ASCII,\n"
-	     " /X - reads number of [bytes] from tape and executes them as code at org 0,\n"
-	     " /A - (optional) asks to press play on tape before the selected operation.\n\n"
-	     "Seek your tape to the desired point from which to begin the operation, first.\n"
+  printf("\n"
+         "5150CAXX [/A] /R  target [bytes]\n"
+         "         [/A] /D  [bytes]\n"
+         "         [/A] /X  [bytes]\n"
+         "         [/A] /W  source [bytes]\n"
+         "         [/A] /WB source [bytes]\n"
+         "where:\n"
+         " /A  - (optional) asks to press play on tape before the selected operation,\n"
+         " /R  - reads number of [bytes] from tape and saves them to target,\n"	       
+         " /D  - reads number of [bytes] from tape and dumps them to screen as raw ASCII,\n"
+         " /X  - reads number of [bytes] from tape and executes them as code at org 0,\n"
+         " /W  - records source up to [bytes] length to tape,\n"
+         " /WB - records source up to [bytes] to tape as ROM-BASIC launchable binary.\n\n"
+         "Seek your tape to the desired point from which to begin the operation, first.\n"
          "The source and target can be a file name or a hex memory segment (eg. 0xF600).\n"	     
-	     "Using segments instead of file names (/R and /W only) might cause a crash\n"
+         "Using segments instead of file names (/R, /W, /WB only) might cause a crash\n"
          "if writing into nonexistent (unallocated) or already occupied locations.\n"
-	     "/X will crash the system if illegal instructions are read from the tape.\n"
+         "/X will crash the system if illegal instructions are read from the tape.\n"
          "Using [bytes] is optional. In any case, the max size above cannot be exceeded.\n");
 }
 
@@ -400,6 +529,12 @@ void ParseCommandLine(int argc, char* argv[])
       cOperation = 'W';
       pFileName = argv[indexArgs+1];
     }
+    else if ( (argc > indexArgs+1) && (stricmp(pArgument, "/WB") == 0) )
+    {
+      cOperation = 'W';
+      pFileName = argv[indexArgs+1];
+      nCreateBASICRecord = 1;
+    }
     else if (stricmp(pArgument, "/D") == 0)
     {
       cOperation = 'D';
@@ -426,7 +561,14 @@ void ParseCommandLine(int argc, char* argv[])
     }
 
     /* Deallocate memory reserved file usage */
-    freemem(nBufferSegment);
+    if (pNearBuffer)
+    {
+      free(pNearBuffer);
+    }
+    else if (pFarBuffer)
+    {
+      farfree(pFarBuffer);
+    }
     
     /* Set the int 15h buffer segment manually */
     nBufferSegment = (unsigned int)nCmdLine;
@@ -438,6 +580,23 @@ void ParseCommandLine(int argc, char* argv[])
     {
       nMaximumDataSize = (unsigned int)(0x100000 - nCmdLine);
       printf("Reducing this to %u bytes, for segment not to overlap the 1MB boundary.\n", nMaximumDataSize);
+    }
+    
+    /* Used with /WB */
+    sprintf(cFileNameOnly, "0x%04X", nBufferSegment);
+  }  
+  else if (pFileName)
+  {
+     /* Obtain file name without ext or path */
+    _splitpath(pFileName, NULL, NULL, cFileNameOnly, cFileExtOnly);
+    
+    /* Determine extension */
+    if (nCreateBASICRecord && (strlen(cFileExtOnly) > 0)
+                           && (stricmp(cFileExtOnly, ".com") != 0)
+                           && (stricmp(cFileExtOnly, ".bin") != 0))
+    {
+      printf("\nA .COM or other <=64K binary with no DOS function calls is required.\n");
+      Quit(EXIT_FAILURE);
     }
   }
   
@@ -537,7 +696,12 @@ void DoOperation()
     nFileSize = ftell(pFile);
     rewind(pFile);
     
-    if (nFileSize > nSpecifiedBytes)
+    if (nFileSize == 0)
+    {
+      printf("\nThe file is empty\n");
+      Quit(EXIT_FAILURE); 
+    }    
+    else if (nFileSize > nSpecifiedBytes)
     {
       printf("\nReading the first %u bytes of the file only.", nSpecifiedBytes);
     }
@@ -592,6 +756,7 @@ void DoOperation()
   if (cOperation == 'W')
   {
     unsigned int nOffset = 0;
+    unsigned int nBinaryLoadingOfs = (stricmp(cFileExtOnly, ".com") == 0) ? 0x100 : 0;
     
     if (nTargetIsMemorySegment)
     {
@@ -628,13 +793,28 @@ _skipread:
     
     DelLine();
     printf("Recording tape...");
-    nMainOperationResult = WriteTape(nSpecifiedBytes, &nSuccessfulBytes);
+    if (!nCreateBASICRecord)
+    {
+      nMainOperationResult = WriteTape(nSpecifiedBytes, &nSuccessfulBytes);
+    }
+    else
+    {
+      /* Will be read to 0300:0000 (BIN) or 0300:0100 (.COM) */
+      nMainOperationResult = WriteTapeWithBasicStub(nSpecifiedBytes, &nSuccessfulBytes, 0x300, nBinaryLoadingOfs);
+    }
+
     TapeMotorOff();
     CheckForErrors(nMainOperationResult, 1);
     
     printf("\n%u out of %u bytes recorded successfully.\n"
            "Be sure you note down this value, and also your current tape position.\n",
 	       nSuccessfulBytes, nSpecifiedBytes);
+         
+    if (nCreateBASICRecord)
+    {
+      printf("\nTo run in ROM-BASIC, execute following: LOAD \"%s\",R"
+             "\nLoading this under DOS Disk BASIC/BASICA.COM will crash the system.\n", cFileNameOnly);
+    }
     
     Quit(EXIT_SUCCESS);
   }

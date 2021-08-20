@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <mem.h>
+#include <alloc.h>
 #include <dos.h>
 
 #include "5150caxx.h"
