@@ -2,6 +2,7 @@
    Compile using BUILD.BAT */
 
 #include <stdio.h>
+#include <conio.h>
 #include <stdlib.h>
 #include <mem.h>
 #include <alloc.h>

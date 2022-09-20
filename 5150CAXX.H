@@ -1,14 +1,29 @@
+/* Tape data buffers - far used defaultly or near if there's not enough memory */
+unsigned char* pNearTapeBuffer = NULL;
+unsigned char far* pFarTapeBuffer = NULL;
+unsigned int nTapeBufferSegment = 0;
+unsigned int nMaximumTapeDataSize = 0xffff; /* 64 K */
+
+/* To detect if we're on an IBM PC or Jr */
+unsigned char far* pEquipmentByte = (unsigned char far*)MK_FP(0xf000, 0xfffe);
+
+/* Used if tweaking recording speed.
+   Bit1 usually requires to be within 25% deviation (750-1250Hz)
+   for the BIOS "leader finding" code to work properly.
+*/
+unsigned char far* pFarBiosBuffer = NULL; /* 8K BIOS buffer, used to shadow INT 15h */
+unsigned int far* pINT15PatchSeg = (unsigned int far*)MK_FP(0, 0x56); /* INT 15h*4 = offset, +2: segment */
+unsigned int nBit0FrequencyHz = 2000; /* Bit 0 is a 0.5 ms (2000Hz) pulse by default */
+unsigned int nBit1FrequencyHz = 1000; /* Bit 1 is a 1 ms (1000Hz) pulse by default */
+const unsigned long nPITFrequencyHz = 1193180; /* PIT runs on 1.19318MHz off a divider */
+
+/* Files related */
 FILE* pFile = NULL;
-
-unsigned char* pNearBuffer = NULL;
-unsigned char far* pFarBuffer = NULL;
-unsigned int nBufferSegment = 0;
-unsigned int nMaximumDataSize = 0xffff;
-
 const char* pFileName = NULL;
 unsigned char cFileNameOnly[9] = {0};
 unsigned char cFileExtOnly[5] = {0};
 
+/* Options parsed from the command line */
 unsigned char nWaitForPressPlay = 0;
 unsigned char cOperation = 0;
 unsigned char nCreateBASICRecord = 0;
@@ -69,7 +84,7 @@ unsigned char ReadTape(unsigned int nBytesToRead, unsigned int* nBytesRead)
 
   regs.x.ax = 0x200;
   regs.x.cx = nBytesToRead;
-  sregs.es = nBufferSegment;
+  sregs.es = nTapeBufferSegment;
   regs.x.bx = 0;
   
   /* Disable hardware IRQ ISRs during tape operation */
@@ -91,7 +106,7 @@ unsigned char WriteTape(unsigned int nBytesToWrite, unsigned int* nBytesWritten)
 
   regs.x.ax = 0x300;
   regs.x.cx = nBytesToWrite;
-  sregs.es = nBufferSegment;
+  sregs.es = nTapeBufferSegment;
   regs.x.bx = 0;
   
   /* Disable hardware IRQ ISRs during tape operation */
@@ -177,7 +192,7 @@ void DumpMemory(unsigned int nLength)
   
   for (; nOffset < nLength; nOffset++)
   {
-    unsigned char nByte = *((unsigned char far*)(MK_FP(nBufferSegment, nOffset)));
+    unsigned char nByte = *((unsigned char far*)(MK_FP(nTapeBufferSegment, nOffset)));
     
     /* Skip ASCII BELL (control code 7) to stop the machine from honking */
     if (nByte == 7)
@@ -205,7 +220,7 @@ void CallMemory()
   asm push dx
     
   /* Set DS and ES to be the same as CS of tape buffer (will be CS=DS=ES) */
-  _BX = nBufferSegment;
+  _BX = nTapeBufferSegment;
   _DS = _BX;
   _ES = _BX;
   
@@ -265,13 +280,22 @@ void Quit(int nStatus)
   }
 
   /* Deallocate memory used with disk I/O */
-  if (pNearBuffer)
+  if (pNearTapeBuffer)
   {
-    free(pNearBuffer);
+    free(pNearTapeBuffer);
   }
-  else if (pFarBuffer)
+  else if (pFarTapeBuffer)
   {
-    farfree(pFarBuffer);
+    farfree(pFarTapeBuffer);
+  }
+  
+  /* Did we tweak the recording speed? */
+  if (pFarBiosBuffer)
+  {
+    /* Restore INT 15h ISR segment back to BIOS 0xF000 */
+    *pINT15PatchSeg = 0xf000;
+    
+    farfree(pFarBiosBuffer);
   }
     
   /* Make sure the tape motor is off before passing control */
@@ -321,11 +345,11 @@ void PrintMaximumSizeLimit()
   unsigned long nAddress = 0;
    
   /* Allocate 64K RAM (+ some reserve for the zero offset alignment)... */
-  unsigned long nAllocSize = (unsigned long)nMaximumDataSize + 16;
-  pFarBuffer = farmalloc(nAllocSize);
+  unsigned long nAllocSize = (unsigned long)nMaximumTapeDataSize + 16;
+  pFarTapeBuffer = farmalloc(nAllocSize);
   
   /* Not enough memory? */
-  if (!pFarBuffer)
+  if (!pFarTapeBuffer)
   {
     /* Get free memory (minus some reserve for the standard library) for both heaps */
     const unsigned int nNearFree = coreleft();
@@ -358,16 +382,16 @@ _nomem:
     /* near or far... */    
     if (!nAllocateNearBuffer)
     {
-      pFarBuffer = farmalloc(nAllocSize);
-      if (!pFarBuffer)
+      pFarTapeBuffer = farmalloc(nAllocSize);
+      if (!pFarTapeBuffer)
       {
         asm jmp _nomem
       }  
     }
     else
     {
-      pNearBuffer = malloc((unsigned int)nAllocSize);
-      if (!pNearBuffer)
+      pNearTapeBuffer = malloc((unsigned int)nAllocSize);
+      if (!pNearTapeBuffer)
       {
         asm jmp _nomem
       }
@@ -377,11 +401,11 @@ _nomem:
   /* Success. Determine address of heap buffer in memory */
   if (!nAllocateNearBuffer)
   {
-    nAddress = (FP_SEG(pFarBuffer) * (unsigned long)0x10) + FP_OFF(pFarBuffer);    
+    nAddress = (FP_SEG(pFarTapeBuffer) * (unsigned long)0x10) + FP_OFF(pFarTapeBuffer);
   }
   else
   {
-    nAddress = (_DS * (unsigned long)0x10) + (unsigned int)(pNearBuffer);    
+    nAddress = (_DS * (unsigned long)0x10) + (unsigned int)(pNearTapeBuffer);
   }  
   
   /* Not aligned to offset 0? (most of the time) */
@@ -389,8 +413,8 @@ _nomem:
   {
     /* Align to 0 and subtract the offset difference from the maximum available size */
     unsigned long nAlignedAddress;
-    nBufferSegment = (unsigned int)((nAddress / 0x10) + 1);
-    nAlignedAddress = nBufferSegment * (unsigned long)0x10;
+    nTapeBufferSegment = (unsigned int)((nAddress / 0x10) + 1);
+    nAlignedAddress = nTapeBufferSegment * (unsigned long)0x10;
     
     nAllocSize -= labs(nAlignedAddress - nAddress);
   }
@@ -398,7 +422,7 @@ _nomem:
   /* Aligned perfectly, use as is */
   else
   {
-    nBufferSegment = (unsigned int)(nAddress / 0x10); /* set segment */
+    nTapeBufferSegment = (unsigned int)(nAddress / 0x10); /* set segment */
   }
   
   /* Round to 64K and set maximum data size */
@@ -406,20 +430,20 @@ _nomem:
   {
     nAllocSize = 0xffff;
   }
-  nMaximumDataSize = (unsigned int)nAllocSize;
+  nMaximumTapeDataSize = (unsigned int)nAllocSize;
   
   /* Clear the buffer */
-  _fmemset(MK_FP(nBufferSegment, 0), 0, nMaximumDataSize);
+  _fmemset(MK_FP(nTapeBufferSegment, 0), 0, nMaximumTapeDataSize);
   
   printf("\nMaximum data size: ");
-  if (nMaximumDataSize == 0xffff)
+  if (nMaximumTapeDataSize == 0xffff)
   {
     printf("64K\n");
   }
   
   else
   {
-    printf("%u bytes (64K, if given existing RAM segment)\n", nMaximumDataSize);
+    printf("%u bytes (64K, if given existing RAM segment)\n", nMaximumTapeDataSize);
   }
 }
 
@@ -429,12 +453,9 @@ void CheckCurrentSetup()
   /* Error messages */
   const char sPCRequired[] = "\nAn original IBM 5150 or PCjr is required to run this application.\n";
   const char s8088Required[] = "\nA genuine Intel 8088 CPU is required to run this application.\n";
-  
-  /* Get PC equipment byte */
-  unsigned char nEquipmentByte = *((unsigned char far*)MK_FP(0xf000, 0xfffe));
-  
+    
   /* Must be an IBM PC or PCjr */
-  if ((nEquipmentByte != 0xff) && (nEquipmentByte != 0xfd))
+  if ((*pEquipmentByte != 0xff) && (*pEquipmentByte != 0xfd))
   {
     printf(sPCRequired);
     Quit(EXIT_FAILURE);
@@ -461,44 +482,147 @@ void CheckCurrentSetup()
     printf(s8088Required);
     Quit(EXIT_FAILURE);
   }
+  
+  /* We are on an IBM, increase text performance a little */
+  directvideo = 1;
 }
 
 /* Printed on incorrect or no command line arguments */
 void PrintUsage()
 {
   printf("\n"
-         "5150CAXX [/A] /R  target [bytes]\n"
-         "         [/A] /D  [bytes]\n"
-         "         [/A] /X  [bytes]\n"
-         "         [/A] /W  source [bytes]\n"
-         "         [/A] /WB source [bytes]\n"
+         "5150CAXX [/A]\t\t     /R  target [bytes]\n"
+         "\t [/A]\t\t     /D  [bytes]\n"
+         "\t [/A]\t\t     /X  [bytes]\n"
+         "\t [/A] [/F bit0 bit1] /W  source [bytes]\n"
+         "\t [/A] [/F bit0 bit1] /WB source [bytes]\n"
          "where:\n"
-         " /A  - (optional) asks to press play on tape before the selected operation,\n"
          " /R  - reads number of [bytes] from tape and saves them to target,\n"	       
          " /D  - reads number of [bytes] from tape and dumps them to screen as raw ASCII,\n"
          " /X  - reads number of [bytes] from tape and executes them as code at org 0,\n"
          " /W  - records source up to [bytes] length to tape,\n"
-         " /WB - records source up to [bytes] to tape as ROM-BASIC launchable binary.\n\n"
+         " /WB - records source up to [bytes] to tape as ROM-BASIC launchable binary,\n"         
+         " /A  - optionally asks to press play on tape before the selected operation,\n"
+         " /F  - sets bit0/bit1 freq. in Hz; tweaks recording speed. Default: 2000 1000.\n\n"
          "Seek your tape to the desired point from which to begin the operation, first.\n"
          "The source and target can be a file name or a hex memory segment (eg. 0xF600).\n"	     
-         "Using segments instead of file names (/R, /W, /WB only) might cause a crash\n"
-         "if writing into nonexistent (unallocated) or already occupied locations.\n"
+         "Passing a segment to /R can cause a crash if the memory is already occupied.\n"
          "/X will crash the system if illegal instructions are read from the tape.\n"
          "Using [bytes] is optional. In any case, the max size above cannot be exceeded.\n");
+}
+
+/* Tweak the recording speed by "shadowing" ROM-BIOS and patching the timers */
+void SetRecordingSpeed()
+{
+  /* Stuff we'll use */ 
+  unsigned int nSegment = 0;
+  unsigned long nAddress = 0;  
+  unsigned int far* pPatchBit0Div = NULL;
+  unsigned int far* pPatchBit1Div = NULL;
+  unsigned int far* pPatchBit1DivPcJr = NULL;  
+  
+  /* Allocate an 8K buffer for BIOS + 16-byte overhead for offset alignment at 0xE000 */
+  pFarBiosBuffer = farmalloc(8192 + 16);
+  if (pFarBiosBuffer)
+  {
+    nAddress = (FP_SEG(pFarBiosBuffer) * (unsigned long)0x10) + FP_OFF(pFarBiosBuffer);
+  }
+  
+  /* Allocation failed, or we won't be able to align the starting offset for some weird reason */
+  if (nAddress < 0xe000)
+  {
+    if (pFarBiosBuffer)
+    {
+      farfree(pFarBiosBuffer);
+      pFarBiosBuffer = NULL;
+    }
+    
+    /* Continue, just warn */
+    printf("\nNot enough memory to set custom frequencies, using default.\n");
+    return;
+  }
+  
+  /* Shadowed BIOS code needs to start at offset 0xE000 exactly - perform alignment */
+  nSegment = (nAddress - 0xE000) / 0x10; /* 16-byte leeway, ah well */
+  
+  /* Copy the ROM BIOS into our RAM so we can do patching */
+  _fmemcpy(MK_FP(nSegment, 0xE000), MK_FP(0xF000, 0xE000), 8192);
+  
+  /* Look where to patch.
+     In both PC and Jr, bit0 frequency divisor is 592, for bit1 it is 1184.
+     They assume a 1184000 dividend instead of the more proper 1193180, which is closer to the real PIT freq.
+     Actual frequency in Hz = PIT freq. (1193180) Hz / divisor
+     The lower the frequency, the longer the time period for a bit, and thus, the recording speed is slower.
+  */  
+  
+  /* IBM 5150 - 2 possible memory locations, depending on BIOS */
+  if (*pEquipmentByte == 0xff)
+  {
+    /* bit0 freq divisor is at address 0xFA2D or 0xFA34 */
+    pPatchBit0Div = (unsigned int far*)MK_FP(nSegment, 0xFA2D);
+    if (*pPatchBit0Div != 592)
+    {
+      pPatchBit0Div = (unsigned int far*)MK_FP(nSegment, 0xFA34);
+    }
+    
+    /* bit1 freq divisor address at 0xFA28 or 0xFA2F */
+    pPatchBit1Div = (unsigned int far*)MK_FP(nSegment, 0xFA28);
+    if (*pPatchBit1Div != 1184)
+    {
+      pPatchBit1Div = (unsigned int far*)MK_FP(nSegment, 0xFA2F);
+    }
+  }
+  
+  /* PCjr */
+  else
+  {
+    /* bit0 freq divisor is at address 0xFA25 */
+    pPatchBit0Div = (unsigned int far*)MK_FP(nSegment, 0xFA25);
+        
+    /* two bit1 freq divisor addresses in a Jr, at 0xF9A9 and 0xFA20 */
+    pPatchBit1Div = (unsigned int far*)MK_FP(nSegment, 0xF9A9);
+    pPatchBit1DivPcJr = (unsigned int far*)MK_FP(nSegment, 0xFA20);
+  }
+
+  /* Sanity check */ 
+  if ((*pPatchBit0Div != 592) || (*pPatchBit1Div != 1184))
+  {
+    printf("\nNon-standard BIOS detected, cannot set custom speed.\n");
+    farfree(pFarBiosBuffer);
+    pFarBiosBuffer = NULL;
+    return;
+  }
+  
+  /* Now patch the 2 divisors according to the chosen frequencies.
+     If on PCjr, also patch the second bit1 freq occurence. */
+  printf("\nUsing custom recording speed: bit0 frequency %u Hz, bit1 frequency %u Hz.\n",
+         nBit0FrequencyHz, nBit1FrequencyHz);
+         
+  *pPatchBit0Div = nPITFrequencyHz / nBit0FrequencyHz;
+  *pPatchBit1Div = nPITFrequencyHz / nBit1FrequencyHz;  
+  
+  if (*pEquipmentByte == 0xfd)
+  {
+    *pPatchBit1DivPcJr = *pPatchBit1Div;
+  }
+   
+  /* Set the new INT 15h vector to use our shadow-patch. And we're done! */
+  *pINT15PatchSeg = nSegment;
 }
 
 void ParseCommandLine(int argc, char* argv[])
 {
   int indexArgs = 0;
   int indexSec = 0;
-  
+   
   /* Display usage information */
-  if ( (argc < 2) || (argc > 5) )
+  if ( (argc < 2) || (argc > 8) )
   {
     PrintUsage();
     Quit(EXIT_SUCCESS);
   }
   
+  /* Ugly parsing follows */  
   for (indexArgs = 1; indexArgs < argc; indexArgs++)
   {
     char* pArgument = argv[indexArgs];
@@ -508,7 +632,26 @@ void ParseCommandLine(int argc, char* argv[])
     {
       nWaitForPressPlay = 1;  
     }
-    else if ( (indexArgs == argc-1) && (nWantedBytes > 0) )
+    else if ((stricmp(pArgument, "/F") == 0) && (argc > indexArgs+2))
+    {
+      nBit0FrequencyHz = strtoul(argv[indexArgs+1], NULL, 10);
+      nBit1FrequencyHz = strtoul(argv[indexArgs+2], NULL, 10);
+      
+      /* 600-6000 Hz */
+      if ((nBit0FrequencyHz < 600) || 
+          (nBit1FrequencyHz < 600) || 
+          (nBit0FrequencyHz > 6000) ||
+          (nBit1FrequencyHz > 6000))
+      {
+        printf("\nFrequencies must be between 600-6000 Hz.\nFor fastest data rate, try 5250 1250, for slowest, try 1400 700.\n");
+        Quit(EXIT_FAILURE);
+      }
+      
+      /* Filler so this does not get mistaken for "wanted bytes" if at the end */
+      argv[indexArgs+1][0] = 'A';
+      argv[indexArgs+2][0] = 'B';
+    }    
+    else if ( pFileName && (indexArgs == argc-1) && (nWantedBytes > 0) )
     {
       for (indexSec = 0; indexSec < strlen(pArgument); indexSec++)
       {
@@ -561,29 +704,31 @@ void ParseCommandLine(int argc, char* argv[])
     }
 
     /* Deallocate memory reserved file usage */
-    if (pNearBuffer)
+    if (pNearTapeBuffer)
     {
-      free(pNearBuffer);
+      free(pNearTapeBuffer);
+      pNearTapeBuffer = NULL;
     }
-    else if (pFarBuffer)
+    else if (pFarTapeBuffer)
     {
-      farfree(pFarBuffer);
+      farfree(pFarTapeBuffer);
+      pFarTapeBuffer = NULL;
     }
     
     /* Set the int 15h buffer segment manually */
-    nBufferSegment = (unsigned int)nCmdLine;
-    nMaximumDataSize = 0xffff; /* full segments are 64K max. */
+    nTapeBufferSegment = (unsigned int)nCmdLine;
+    nMaximumTapeDataSize = 0xffff; /* full segments are 64K max. */
     
     /* Correct maximum data size if going past the 1MB boundary */
     nCmdLine *= 0x10;
-    if (nCmdLine+nMaximumDataSize > 0xfffff)
+    if (nCmdLine+nMaximumTapeDataSize > 0xfffff)
     {
-      nMaximumDataSize = (unsigned int)(0x100000 - nCmdLine);
-      printf("Reducing this to %u bytes, for segment not to overlap the 1MB boundary.\n", nMaximumDataSize);
+      nMaximumTapeDataSize = (unsigned int)(0x100000 - nCmdLine);
+      printf("Given RAM segment.\nReducing 64K maximum to %u bytes, for it not overlap the 1MB boundary.\n", nMaximumTapeDataSize);
     }
     
     /* Used with /WB */
-    sprintf(cFileNameOnly, "0x%04X", nBufferSegment);
+    sprintf(cFileNameOnly, "0x%04X", nTapeBufferSegment);
   }  
   else if (pFileName)
   {
@@ -603,7 +748,7 @@ void ParseCommandLine(int argc, char* argv[])
   /* Size to read or write manually specified on commandline. Check if it is 0 < arg < 64K */
   if (nWantedBytes > 0)
   {
-    if (nWantedBytes <= nMaximumDataSize)
+    if (nWantedBytes <= nMaximumTapeDataSize)
     {
       nSpecifiedBytes = (unsigned int)nWantedBytes;
     }
@@ -612,6 +757,12 @@ void ParseCommandLine(int argc, char* argv[])
       printf("\nSpecified data size of %lu bytes exceeds memory/segment limit\n", nWantedBytes);
       Quit(EXIT_FAILURE);
     } 
+  }
+  
+  /* Tweak recording speed */
+  if ((cOperation == 'W') && ((nBit0FrequencyHz != 2000) || (nBit1FrequencyHz != 1000)))
+  {
+    SetRecordingSpeed();
   }
   
   /* Still unknown operation */
@@ -623,7 +774,7 @@ void ParseCommandLine(int argc, char* argv[])
 }
 
 /* Check result of INT 15h, allow continue on non-fatal errors */
-void CheckForErrors(unsigned char nResult, const int nRecording)
+void CheckForErrors(unsigned char nResult)
 {  
   DelLine();
   
@@ -633,34 +784,15 @@ void CheckForErrors(unsigned char nResult, const int nRecording)
     printf("Success!");
     break;
   case 1:
-    if (nRecording)
-    {
-      printf("Reached a CRC error while recording.\n");
-      Quit(EXIT_FAILURE);
-    }
-    else
-    {
-      printf("Reached a CRC error (or end of a valid data stream) here. Stop.");
-    }
+    printf("Reached a CRC error (or end of a valid data stream) here. Stop.");
     break;
   case 2:
     printf("Reached bad tape signal (or end of a valid data stream) here. Stop.");
     break;
   case 4:
-    printf("No data on tape, or no valid tape present.\n");
+    printf("No data leader on tape, or no valid tape present.\n");
     Quit(EXIT_FAILURE);
-    break;
-  case 0x80:
-    printf("Unsupported command for the tape interface.\n");
-    Quit(EXIT_FAILURE);
-    break;
-  case 0x86:
-    printf("No tape in drive, or no tape drive present.\n");
-    Quit(EXIT_FAILURE);
-    break;
   default:
-    printf("Error: ROM-BIOS returned an unspecified error code.\n");
-    Quit(EXIT_FAILURE);
     break;
   }
 }
@@ -671,6 +803,7 @@ void DoOperation()
   unsigned int nSuccessfulBytes = 0;
   unsigned char nMainOperationResult = 0;                                              
   long nFileSize = 0;
+  unsigned char cBuffer[1024] = {0};
     
   /* Will be reading or writing a file ? Open it in the correct mode */
   if (!nTargetIsMemorySegment && ((cOperation == 'R') || (cOperation == 'W')))
@@ -686,7 +819,7 @@ void DoOperation()
   /* No manually specified number of bytes to read/write (or invalid) */
   if (nSpecifiedBytes == 0)
   {
-    nSpecifiedBytes = nMaximumDataSize;
+    nSpecifiedBytes = nMaximumTapeDataSize;
   }
   
   /* If we're going to write to the tape, inform about the boundary */
@@ -725,7 +858,7 @@ void DoOperation()
     }
     else
     {
-      printf(" to memory segment 0x%04X.\n\n", nBufferSegment);
+      printf(" to memory segment 0x%04X.\n\n", nTapeBufferSegment);
     }
     break;
   case 'W':
@@ -735,7 +868,7 @@ void DoOperation()
     }
     else
     {
-      printf(" from memory segment 0x%04X.\n\n", nBufferSegment);  
+      printf(" from memory segment 0x%04X.\n\n", nTapeBufferSegment);  
     }
     break;
   case 'D':
@@ -768,7 +901,6 @@ void DoOperation()
     /* In 1K increments (no far fread) */
     while (nOffset != nSpecifiedBytes)
     {
-      unsigned char cBuffer[1024] = {0};
       const int nSize = ((nSpecifiedBytes-nOffset) < 1024) ? nSpecifiedBytes-nOffset : 1024;
       size_t nResult = fread(cBuffer, sizeof(unsigned char), nSize, pFile);
       
@@ -779,7 +911,7 @@ void DoOperation()
         Quit(EXIT_FAILURE);
       }
       
-      _fmemcpy(MK_FP(nBufferSegment, nOffset), cBuffer, nSize);
+      _fmemcpy(MK_FP(nTapeBufferSegment, nOffset), cBuffer, nSize);
       nOffset += nSize;
     }
     
@@ -788,11 +920,9 @@ _skipread:
     WaitForKeypress();
     DelLine();
     
-    printf("Tape motor on...");   
-    CheckForErrors(TapeMotorOn(), 0);
-    
-    DelLine();
     printf("Recording tape...");
+    TapeMotorOn();    
+    
     if (!nCreateBASICRecord)
     {
       nMainOperationResult = WriteTape(nSpecifiedBytes, &nSuccessfulBytes);
@@ -804,7 +934,7 @@ _skipread:
     }
 
     TapeMotorOff();
-    CheckForErrors(nMainOperationResult, 1);
+    CheckForErrors(nMainOperationResult);
     
     printf("\n%u out of %u bytes recorded successfully.\n"
            "Be sure you note down this value, and also your current tape position.\n",
@@ -823,14 +953,12 @@ _skipread:
   WaitForKeypress();
   DelLine();
   
-  printf("Tape motor on...");   
-  CheckForErrors(TapeMotorOn(), 0);
-    
-  DelLine();  
-  printf("Loading tape..."); 
+  printf("Loading tape...");
+  TapeMotorOn();  
+  
   nMainOperationResult = ReadTape(nSpecifiedBytes, &nSuccessfulBytes);
   TapeMotorOff();
-  CheckForErrors(nMainOperationResult, 0);
+  CheckForErrors(nMainOperationResult);
   
   printf("\n%u out of %u bytes read successfully.\n", nSuccessfulBytes, nSpecifiedBytes);
   
@@ -843,7 +971,7 @@ _skipread:
   /* Do nothing more if the target is a custom memory segment */
   if (nTargetIsMemorySegment)
   {
-    printf("\nTape buffer stored at address 0x%04X:0.\n", nBufferSegment);
+    printf("\nTape buffer stored at address 0x%04X:0.\n", nTapeBufferSegment);
     Quit(EXIT_SUCCESS);
   }
   
@@ -859,10 +987,9 @@ _skipread:
     /* in 1K increments from the far memory (no far fwrite) */
     while (nOffset != nSuccessfulBytes)
     {
-      unsigned char cBuffer[1024] = {0};
       const int nSize = ((nSuccessfulBytes-nOffset) < 1024) ? nSuccessfulBytes-nOffset : 1024;
       
-      _fmemcpy(cBuffer, MK_FP(nBufferSegment, nOffset), nSize);
+      _fmemcpy(cBuffer, MK_FP(nTapeBufferSegment, nOffset), nSize);
       
       if (fwrite(cBuffer, sizeof(unsigned char), nSize, pFile) < nSize)
       {
