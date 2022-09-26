@@ -12,7 +12,11 @@ unsigned char far* pEquipmentByte = (unsigned char far*)MK_FP(0xf000, 0xfffe);
    for the BIOS "leader finding" code to work properly.
 */
 unsigned char far* pFarBiosBuffer = NULL; /* 8K BIOS buffer, used to shadow INT 15h */
-unsigned int far* pINT15PatchSeg = (unsigned int far*)MK_FP(0, 0x56); /* INT 15h*4 = offset, +2: segment */
+unsigned int far* pINT15PatchSeg = (unsigned int far*)MK_FP(0, 0x56); /* INT 15h vector segment */
+unsigned int far* pINT15PatchOfs = (unsigned int far*)MK_FP(0, 0x54); /* INT 15h vector offset */
+unsigned int nINT15SegOrig = 0xF000; /* On IBM PC/jr, INT 15h points to F000:F859 by default */
+unsigned int nINT15OfsOrig = 0xF859; /* This can be overriden by DOS! */
+
 unsigned int nBit0FrequencyHz = 2000; /* Bit 0 is a 0.5 ms (2000Hz) pulse by default */
 unsigned int nBit1FrequencyHz = 1000; /* Bit 1 is a 1 ms (1000Hz) pulse by default */
 const unsigned long nPITFrequencyHz = 1193180; /* PIT runs on 1.19318MHz off a divider */
@@ -292,8 +296,9 @@ void Quit(int nStatus)
   /* Did we tweak the recording speed? */
   if (pFarBiosBuffer)
   {
-    /* Restore INT 15h ISR segment back to BIOS 0xF000 */
-    *pINT15PatchSeg = 0xf000;
+    /* Restore original INT 15h vector */
+    *pINT15PatchSeg = nINT15SegOrig;
+    *pINT15PatchOfs = nINT15OfsOrig;
     
     farfree(pFarBiosBuffer);
   }
@@ -490,25 +495,48 @@ void CheckCurrentSetup()
 /* Printed on incorrect or no command line arguments */
 void PrintUsage()
 {
+  /* /F argument (tweak baudrate) not allowed on PCjr due to 64k ROM BIOS */
+  unsigned char nAllowFArgument = (*pEquipmentByte != 0xfd);
+  unsigned char cTabs[] = "\t\t     ";
+  unsigned char cFArgument[] = " [/F bit0 bit1] ";
+  
+  if (!nAllowFArgument)
+  {
+    strcpy(cTabs, " ");
+    strcpy(cFArgument, " ");
+  }
+  
+  /* Print out possible input arguments... */  
   printf("\n"
-         "5150CAXX [/A]\t\t     /R  target [bytes]\n"
-         "\t [/A]\t\t     /D  [bytes]\n"
-         "\t [/A]\t\t     /X  [bytes]\n"
-         "\t [/A] [/F bit0 bit1] /W  source [bytes]\n"
-         "\t [/A] [/F bit0 bit1] /WB source [bytes]\n"
-         "where:\n"
-         " /R  - reads number of [bytes] from tape and saves them to target,\n"	       
-         " /D  - reads number of [bytes] from tape and dumps them to screen as raw ASCII,\n"
-         " /X  - reads number of [bytes] from tape and executes them as code at org 0,\n"
-         " /W  - records source up to [bytes] length to tape,\n"
-         " /WB - records source up to [bytes] to tape as ROM-BASIC launchable binary,\n"         
-         " /A  - optionally asks to press play on tape before the selected operation,\n"
-         " /F  - sets bit0/bit1 freq. in Hz; tweaks recording speed. Default: 2000 1000.\n\n"
-         "Seek your tape to the desired point from which to begin the operation, first.\n"
+       "5150CAXX [/A]%s/R  target [bytes]\n"
+       "\t [/A]%s/D  [bytes]\n"
+       "\t [/A]%s/X  [bytes]\n"
+       "\t [/A]%s/W  source [bytes]\n"
+       "\t [/A]%s/WB source [bytes]\n"
+       "where:\n"
+       " /R  - reads number of [bytes] from tape and saves them to target,\n"	       
+       " /D  - reads number of [bytes] from tape and dumps them to screen as raw ASCII,\n"
+       " /X  - reads number of [bytes] from tape and executes them as code at org 0,\n"
+       " /W  - records source up to [bytes] length to tape,\n"
+       " /WB - records source up to [bytes] to tape as ROM-BASIC launchable binary,\n"
+       " /A  - optionally asks to press play on tape before the selected operation",
+       cTabs, cTabs, cTabs, cFArgument, cFArgument);
+       
+  if (nAllowFArgument)
+  {
+    printf(",\n /F  - sets bit0/bit1 freq. in Hz; tweaks recording speed. Default: 2000 1000.\n\n");
+  }
+  else
+  {
+    printf(".\n\n");
+  }
+  
+  /* ... and the rest */   
+  printf("Seek your tape to the desired point from which to begin the operation, first.\n"
          "The source and target can be a file name or a hex memory segment (eg. 0xF600).\n"	     
          "Passing a segment to /R can cause a crash if the memory is already occupied.\n"
          "/X will crash the system if illegal instructions are read from the tape.\n"
-         "Using [bytes] is optional. In any case, the max size above cannot be exceeded.\n");
+         "Using [bytes] is optional. In any case, the max size above cannot be exceeded.\n"); 
 }
 
 /* Tweak the recording speed by "shadowing" ROM-BIOS and patching the timers */
@@ -519,7 +547,14 @@ void SetRecordingSpeed()
   unsigned long nAddress = 0;  
   unsigned int far* pPatchBit0Div = NULL;
   unsigned int far* pPatchBit1Div = NULL;
-  unsigned int far* pPatchBit1DivPcJr = NULL;  
+  
+  /* Won't work on a PCjr, because we'd have to shadow its 64K BIOS in addition to having our 64K tape data buffer */
+  /* And, we are using a "small" memory model here */
+  if (*pEquipmentByte == 0xfd)
+  {
+    printf("\nCannot shadow PCjr BIOS to set custom speeds. Using default.\n");
+    return;
+  }
   
   /* Allocate an 8K buffer for BIOS + 16-byte overhead for offset alignment at 0xE000 */
   pFarBiosBuffer = farmalloc(8192 + 16);
@@ -538,7 +573,7 @@ void SetRecordingSpeed()
     }
     
     /* Continue, just warn */
-    printf("\nNot enough memory to set custom frequencies, using default.\n");
+    printf("\nNot enough memory to shadow PC BIOS to set custom speeds. Using default.\n");
     return;
   }
   
@@ -548,66 +583,48 @@ void SetRecordingSpeed()
   /* Copy the ROM BIOS into our RAM so we can do patching */
   _fmemcpy(MK_FP(nSegment, 0xE000), MK_FP(0xF000, 0xE000), 8192);
   
-  /* Look where to patch.
-     In both PC and Jr, bit0 frequency divisor is 592, for bit1 it is 1184.
-     They assume a 1184000 dividend instead of the more proper 1193180, which is closer to the real PIT freq.
+  /* Look where to patch:  the bit0 frequency divisor is 592, for bit1 it is 1184.
+     PC BIOS assumes a 1184000 dividend instead of the more proper 1193180, which is closer to the real PIT freq.
      Actual frequency in Hz = PIT freq. (1193180) Hz / divisor
      The lower the frequency, the longer the time period for a bit, and thus, the recording speed is slower.
   */  
   
   /* IBM 5150 - 2 possible memory locations, depending on BIOS */
-  if (*pEquipmentByte == 0xff)
+  /* bit0 freq divisor is at address 0xFA2D or 0xFA34 */
+  pPatchBit0Div = (unsigned int far*)MK_FP(nSegment, 0xFA2D);
+  if (*pPatchBit0Div != 592)
   {
-    /* bit0 freq divisor is at address 0xFA2D or 0xFA34 */
-    pPatchBit0Div = (unsigned int far*)MK_FP(nSegment, 0xFA2D);
-    if (*pPatchBit0Div != 592)
-    {
-      pPatchBit0Div = (unsigned int far*)MK_FP(nSegment, 0xFA34);
-    }
-    
-    /* bit1 freq divisor address at 0xFA28 or 0xFA2F */
-    pPatchBit1Div = (unsigned int far*)MK_FP(nSegment, 0xFA28);
-    if (*pPatchBit1Div != 1184)
-    {
-      pPatchBit1Div = (unsigned int far*)MK_FP(nSegment, 0xFA2F);
-    }
+    pPatchBit0Div = (unsigned int far*)MK_FP(nSegment, 0xFA34);
   }
   
-  /* PCjr */
-  else
+  /* bit1 freq divisor address at 0xFA28 or 0xFA2F */
+  pPatchBit1Div = (unsigned int far*)MK_FP(nSegment, 0xFA28);
+  if (*pPatchBit1Div != 1184)
   {
-    /* bit0 freq divisor is at address 0xFA25 */
-    pPatchBit0Div = (unsigned int far*)MK_FP(nSegment, 0xFA25);
-        
-    /* two bit1 freq divisor addresses in a Jr, at 0xF9A9 and 0xFA20 */
-    pPatchBit1Div = (unsigned int far*)MK_FP(nSegment, 0xF9A9);
-    pPatchBit1DivPcJr = (unsigned int far*)MK_FP(nSegment, 0xFA20);
+    pPatchBit1Div = (unsigned int far*)MK_FP(nSegment, 0xFA2F);
   }
-
+  
   /* Sanity check */ 
   if ((*pPatchBit0Div != 592) || (*pPatchBit1Div != 1184))
   {
-    printf("\nNon-standard BIOS detected, cannot set custom speed.\n");
+    printf("\nNon-standard BIOS detected, cannot set custom speeds.\n");
     farfree(pFarBiosBuffer);
     pFarBiosBuffer = NULL;
     return;
   }
   
-  /* Now patch the 2 divisors according to the chosen frequencies.
-     If on PCjr, also patch the second bit1 freq occurence. */
+  /* Now patch the 2 divisors according to the chosen frequencies. */
   printf("\nUsing custom recording speed: bit0 frequency %u Hz, bit1 frequency %u Hz.\n",
          nBit0FrequencyHz, nBit1FrequencyHz);
          
   *pPatchBit0Div = nPITFrequencyHz / nBit0FrequencyHz;
   *pPatchBit1Div = nPITFrequencyHz / nBit1FrequencyHz;  
-  
-  if (*pEquipmentByte == 0xfd)
-  {
-    *pPatchBit1DivPcJr = *pPatchBit1Div;
-  }
-   
-  /* Set the new INT 15h vector to use our shadow-patch. And we're done! */
+    
+  /* Store the old INT 15h pointer and set the new vector to use our shadow-patch. And we're done! */
+  nINT15SegOrig = *pINT15PatchSeg;
+  nINT15OfsOrig = *pINT15PatchOfs;
   *pINT15PatchSeg = nSegment;
+  *pINT15PatchOfs = 0xF859; /* orig. IBM BIOS offset */
 }
 
 void ParseCommandLine(int argc, char* argv[])
@@ -643,7 +660,7 @@ void ParseCommandLine(int argc, char* argv[])
           (nBit0FrequencyHz > 6000) ||
           (nBit1FrequencyHz > 6000))
       {
-        printf("\nFrequencies must be between 600-6000 Hz.\nFor fastest data rate, try 5250 1250, for slowest, try 1400 700.\n");
+        printf("\nBit frequencies must be between 600 to 6000 Hz.\n");
         Quit(EXIT_FAILURE);
       }
       
